@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { Artifact, ArtifactCategory, Completeness } from '@/types'
-import { ARTIFACT_CATEGORIES, COMPLETENESS } from '@/types'
+import type { Artifact, ArtifactCategory, Completeness, WarehouseStatus } from '@/types'
+import { ARTIFACT_CATEGORIES, COMPLETENESS, WAREHOUSE_STATUSES } from '@/types'
 import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import UnitPicker from '@/components/common/UnitPicker.vue'
 import { useStore } from '@/hooks/usePersistentStore'
-import { artifactStore } from '@/stores/artifactStore'
+import { artifactStore, warehouseStatusOf } from '@/stores/artifactStore'
 import { stratumStore } from '@/stores/stratumStore'
 import { trenchStore } from '@/stores/trenchStore'
 import { downloadCsv } from '@/utils/export'
@@ -20,6 +20,7 @@ const pickTrenchId = ref('')
 const pickStratumId = ref('')
 const filterCategory = ref<ArtifactCategory | ''>('')
 const filterTrenchId = ref('')
+const filterStatus = ref<WarehouseStatus | ''>('')
 const editingId = ref<string | null>(null)
 
 const form = reactive({
@@ -81,11 +82,24 @@ const visible = computed(() =>
       const stratum = stratumState.strata.find((row) => row.id === item.stratumId)
       if (!stratum || stratum.trenchId !== filterTrenchId.value) return false
     }
+    if (filterStatus.value && warehouseStatusOf(item) !== filterStatus.value) return false
     return true
   })
 )
 
 const totalCount = computed(() => visible.value.reduce((sum, item) => sum + item.count, 0))
+
+const statusCounts = computed(() => {
+  const counts: Record<WarehouseStatus, number> = { 未移交: 0, 待核: 0, 已入库: 0 }
+  artifactState.artifacts.forEach((item) => {
+    counts[warehouseStatusOf(item)] += 1
+  })
+  return counts
+})
+
+function statusTagType(status: WarehouseStatus): 'info' | 'warning' | 'success' {
+  return status === '已入库' ? 'success' : status === '待核' ? 'warning' : 'info'
+}
 
 function resetForm(): void {
   editingId.value = null
@@ -141,10 +155,15 @@ async function submit(): Promise<void> {
     return
   }
   if (form.z < lockedStratum.value.topDepth || form.z > lockedStratum.value.bottomDepth) {
-    ElMessage.warning(
-      `出土深度 ${form.z} m 不在单位「${lockedStratum.value.code}」的深度区间（${lockedStratum.value.topDepth}–${lockedStratum.value.bottomDepth} m）内，请核对层位`
-    )
-    return
+    try {
+      await ElMessageBox.confirm(
+        `出土深度 ${form.z} m 不在单位「${lockedStratum.value.code}」的深度区间（${lockedStratum.value.topDepth}–${lockedStratum.value.bottomDepth} m）内。登记后库房入库将退回「待核」，是否仍要登记？`,
+        '层位核对提示',
+        { type: 'warning', confirmButtonText: '仍要登记', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
   }
   const row: Artifact = {
     id: editingId.value ?? uid('af'),
@@ -171,6 +190,50 @@ async function remove(artifact: Artifact): Promise<void> {
   ElMessage.success('出土物已删除')
 }
 
+/** 库房入库对话框 */
+const warehouseDialogVisible = ref(false)
+const warehouseDialogMode = ref<'in' | 'retry'>('in')
+const warehouseForm = reactive({ id: '', code: '', accessionNo: '', warehouseLocation: '' })
+
+function suggestAccessionNo(): string {
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+  const seq = artifactState.artifacts.filter((item) => warehouseStatusOf(item) === '已入库').length + 1
+  return `登-${today}-${String(seq).padStart(3, '0')}`
+}
+
+function openWarehouseDialog(artifact: Artifact, mode: 'in' | 'retry'): void {
+  warehouseDialogMode.value = mode
+  warehouseForm.id = artifact.id
+  warehouseForm.code = artifact.code
+  warehouseForm.accessionNo = artifact.accessionNo ?? suggestAccessionNo()
+  warehouseForm.warehouseLocation = artifact.warehouseLocation ?? ''
+  warehouseDialogVisible.value = true
+}
+
+async function confirmWarehouse(): Promise<void> {
+  if (!warehouseForm.accessionNo.trim()) {
+    ElMessage.warning('请填写登账号')
+    return
+  }
+  const status = await artifactStore.getState().warehouseIn(
+    warehouseForm.id,
+    warehouseForm.accessionNo,
+    warehouseForm.warehouseLocation
+  )
+  warehouseDialogVisible.value = false
+  if (status === '已入库') {
+    ElMessage.success(`已入库：登账号 ${warehouseForm.accessionNo} · 库位 ${warehouseForm.warehouseLocation || '未排'}`)
+  } else {
+    ElMessage.warning('出土深度掉出所属地层单位区间，登账号已退回「待核」，请核对层位后在库房侧重试入库')
+  }
+}
+
+async function toggleLoan(artifact: Artifact): Promise<void> {
+  const lending = !artifact.onLoan
+  await artifactStore.getState().setLoan(artifact.id, lending)
+  ElMessage.success(lending ? '库位已借出' : '库位已归还')
+}
+
 function exportList(): void {
   downloadCsv(
     '出土物清单.csv',
@@ -186,7 +249,11 @@ function exportList(): void {
       z: item.z,
       date: item.date,
       collector: item.collector,
-      tempLocation: item.tempLocation
+      tempLocation: item.tempLocation,
+      accessionNo: item.accessionNo ?? '',
+      warehouseLocation: item.warehouseLocation ?? '',
+      onLoan: item.onLoan ? '借出中' : '在库',
+      warehouseStatus: warehouseStatusOf(item)
     })) as unknown as Record<string, unknown>[],
     [
       { key: 'code', label: '器物编号' },
@@ -200,7 +267,11 @@ function exportList(): void {
       { key: 'z', label: 'Z 深度(m)' },
       { key: 'date', label: '出土日期' },
       { key: 'collector', label: '提取人' },
-      { key: 'tempLocation', label: '临时存放' }
+      { key: 'tempLocation', label: '临时存放' },
+      { key: 'accessionNo', label: '登账号' },
+      { key: 'warehouseLocation', label: '库位' },
+      { key: 'onLoan', label: '借出状态' },
+      { key: 'warehouseStatus', label: '库房状态' }
     ]
   )
   ElMessage.success('出土物清单已导出')
@@ -213,14 +284,17 @@ function exportList(): void {
       <div>
         <h2 class="page-title">出土物登记与清单</h2>
         <p class="page-sub">
-          登记时先锁定所属地层单位（选择器按探方与类型级联），页面即时带出该单位的深度区间并校验出土深度是否落在区间内。
+          记录员负责器物编号与出土坐标等现场信息，库房保管员负责登账号与库位；两侧各管各的字段，互不覆盖。出土深度掉出地层区间时登账号退回「待核」，可在库房侧重试入库。
         </p>
       </div>
       <el-button @click="exportList">导出清单</el-button>
     </div>
 
     <el-card shadow="never" class="form-card">
-      <template #header>登记出土物（层位上下文锁定）</template>
+      <template #header>现场登记（记录员：器物编号 · 出土坐标）</template>
+      <div class="duty-hint">
+        器物编号与出土坐标由记录员维护，实物标签上的编号不被库房新号顶掉；登账号、库位等库房信息在回驻地入库时由保管员分配，临时存放改动不会带偏库房数据。
+      </div>
       <UnitPicker
         v-model="pickStratumId"
         v-model:trench-id="pickTrenchId"
@@ -304,47 +378,103 @@ function exportList(): void {
       <el-select v-model="filterCategory" placeholder="全部类别" clearable style="width: 130px">
         <el-option v-for="item in ARTIFACT_CATEGORIES" :key="item" :label="item" :value="item" />
       </el-select>
+      <el-select v-model="filterStatus" placeholder="全部状态" clearable style="width: 130px">
+        <el-option v-for="item in WAREHOUSE_STATUSES" :key="item" :label="item" :value="item" />
+      </el-select>
       <el-tag type="info" effect="plain">命中 {{ visible.length }} 条 · 合计 {{ totalCount }} 件</el-tag>
+      <el-tag type="info" effect="plain">
+        未移交 {{ statusCounts.未移交 }} · 待核 {{ statusCounts.待核 }} · 已入库 {{ statusCounts.已入库 }}
+      </el-tag>
     </div>
 
     <el-table :data="visible" border stripe row-key="id">
-      <el-table-column prop="code" label="器物编号" width="140" />
-      <el-table-column label="探方" width="150">
+      <el-table-column prop="code" label="器物编号" width="140">
         <template #default="{ row }: { row: Artifact }">
-          <span class="mono">{{ trenchOf(row.stratumId) }}</span>
+          <span class="mono">{{ row.code }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="地层单位" width="110">
+      <el-table-column label="探方 · 单位" width="170">
         <template #default="{ row }: { row: Artifact }">
-          <span class="mono">{{ stratumOf(row.stratumId) }}</span>
+          <div class="mono">{{ trenchOf(row.stratumId) }}</div>
+          <div class="muted">{{ stratumOf(row.stratumId) }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="深度区间" width="240">
+      <el-table-column label="深度区间" width="220">
         <template #default="{ row }: { row: Artifact }">
           <StratumDepthBar
             v-if="stratumState.strata.find((item) => item.id === row.stratumId)"
             :stratum="stratumState.strata.find((item) => item.id === row.stratumId)!"
-            :length="170"
+            :length="160"
             :show-thickness="false"
           />
         </template>
       </el-table-column>
-      <el-table-column prop="category" label="类别" width="90" />
-      <el-table-column prop="count" label="件数" width="80" />
-      <el-table-column prop="completeness" label="残整" width="90" />
-      <el-table-column label="出土坐标 (X,Y,Z)" width="170">
+      <el-table-column prop="category" label="类别" width="80" />
+      <el-table-column prop="count" label="件数" width="70" />
+      <el-table-column label="出土坐标 (X,Y,Z)" width="160">
         <template #default="{ row }: { row: Artifact }">{{ row.x }}, {{ row.y }}, {{ row.z }}</template>
       </el-table-column>
-      <el-table-column prop="date" label="出土日期" width="120" />
-      <el-table-column prop="collector" label="提取人" width="90" />
-      <el-table-column prop="tempLocation" label="临时存放" min-width="140" show-overflow-tooltip />
-      <el-table-column label="操作" width="130" fixed="right">
+      <el-table-column prop="tempLocation" label="临时存放" min-width="130" show-overflow-tooltip />
+      <el-table-column label="登账号 / 库位" width="180">
         <template #default="{ row }: { row: Artifact }">
+          <div class="mono">{{ row.accessionNo || '—' }}</div>
+          <div class="muted">{{ row.warehouseLocation || '未排库位' }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="库房状态" width="100">
+        <template #default="{ row }: { row: Artifact }">
+          <el-tag :type="statusTagType(warehouseStatusOf(row))" effect="light">{{ warehouseStatusOf(row) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="借出" width="80">
+        <template #default="{ row }: { row: Artifact }">
+          <el-tag v-if="row.onLoan" type="warning" effect="plain">借出中</el-tag>
+          <span v-else class="muted">在库</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="270" fixed="right">
+        <template #default="{ row }: { row: Artifact }">
+          <el-button
+            v-if="warehouseStatusOf(row) !== '已入库'"
+            link
+            :type="warehouseStatusOf(row) === '待核' ? 'warning' : 'primary'"
+            size="small"
+            @click="openWarehouseDialog(row, warehouseStatusOf(row) === '待核' ? 'retry' : 'in')"
+          >{{ warehouseStatusOf(row) === '待核' ? '重试入库' : '入库' }}</el-button>
+          <el-button
+            v-if="warehouseStatusOf(row) === '已入库'"
+            link
+            :type="row.onLoan ? 'success' : 'warning'"
+            size="small"
+            @click="toggleLoan(row)"
+          >{{ row.onLoan ? '归还' : '借出' }}</el-button>
           <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
           <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
+
+    <el-dialog
+      v-model="warehouseDialogVisible"
+      :title="warehouseDialogMode === 'retry' ? '重试入库（库房侧）' : '库房入库'"
+      width="460px"
+    >
+      <el-form label-width="90px">
+        <el-form-item label="器物编号">
+          <el-input :model-value="warehouseForm.code" readonly />
+        </el-form-item>
+        <el-form-item label="登账号">
+          <el-input v-model="warehouseForm.accessionNo" placeholder="库房分配的登账号" />
+        </el-form-item>
+        <el-form-item label="库位">
+          <el-input v-model="warehouseForm.warehouseLocation" placeholder="如 A-03-02" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="warehouseDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmWarehouse">确认入库</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -352,6 +482,15 @@ function exportList(): void {
 .form-card {
   border-radius: 12px;
   margin-bottom: 16px;
+}
+.duty-hint {
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #f7f4ee;
+  color: #8a7d66;
+  font-size: 13px;
+  line-height: 1.6;
 }
 .locked {
   display: flex;

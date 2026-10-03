@@ -4,7 +4,7 @@ import Dexie, { type Table } from 'dexie'
 import type { Artifact, Relation, Stratum, Trench } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -29,7 +29,7 @@ class TrenchLogDb extends Dexie {
       meta: 'key'
     })
     // v2：地层单位新增「开口层位」字段，迁移时为历史数据补齐默认值
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         trenches: 'id, code, area, backfilled',
         strata: 'id, trenchId, code, type, topDepth',
@@ -47,6 +47,26 @@ class TrenchLogDb extends Dexie {
             }
             if (!Array.isArray(stratum.inclusions)) {
               stratum.inclusions = []
+            }
+          })
+      })
+    // v3：出土物拆分为现场记录与库房保管，新增登账号 / 库位 / 入库状态；
+    // 旧数据没有入库信息，升级时统一归为「未移交」
+    this.version(SCHEMA_VERSION)
+      .stores({
+        trenches: 'id, code, area, backfilled',
+        strata: 'id, trenchId, code, type, topDepth',
+        artifacts: 'id, stratumId, code, category, date, warehouseStatus',
+        relations: 'id, unitAId, unitBId, type, basis',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Artifact, string>('artifacts')
+          .toCollection()
+          .modify((artifact) => {
+            if (!artifact.warehouseStatus) {
+              artifact.warehouseStatus = '未移交'
             }
           })
       })
@@ -193,7 +213,8 @@ export async function seedDemoData(): Promise<void> {
       z: 0.42,
       date: today,
       collector: '祁野',
-      tempLocation: '工地临时柜 A-2'
+      tempLocation: '工地临时柜 A-2',
+      warehouseStatus: '未移交'
     },
     {
       id: 'af_002',
@@ -207,7 +228,26 @@ export async function seedDemoData(): Promise<void> {
       z: 1.05,
       date: today,
       collector: '祁野',
-      tempLocation: '工地临时柜 A-3'
+      tempLocation: '工地临时柜 A-3',
+      accessionNo: '登-2024-001',
+      warehouseLocation: 'A-03-02',
+      onLoan: false,
+      warehouseStatus: '已入库'
+    },
+    {
+      id: 'af_003',
+      stratumId: 'st_0501_l1',
+      code: 'T0501①:1',
+      category: '瓷器',
+      count: 1,
+      completeness: '完整',
+      x: 1.2,
+      y: 1.5,
+      z: 0.45,
+      date: today,
+      collector: '祁野',
+      tempLocation: '工地临时柜 A-1',
+      warehouseStatus: '待核'
     }
   ])
 
