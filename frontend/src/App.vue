@@ -17,6 +17,7 @@ const menus = [
   { path: '/trenches', label: '探方清单', icon: 'Grid' },
   { path: '/strata', label: '地层单位编目', icon: 'Files' },
   { path: '/artifacts', label: '出土物登记', icon: 'Box' },
+  { path: '/warehouse', label: '库房管理', icon: 'Goods' },
   { path: '/relations', label: '层位关系', icon: 'Share' },
   { path: '/sections', label: '四壁剖面示意', icon: 'DataLine' }
 ]

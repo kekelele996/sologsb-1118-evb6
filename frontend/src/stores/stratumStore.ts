@@ -1,6 +1,7 @@
 import { createStore } from 'zustand/vanilla'
 import type { Stratum, UnitType } from '@/types'
 import { db, syncAll, syncDelete, syncPut } from '@/hooks/usePersistentStore'
+import { artifactStore } from '@/stores/artifactStore'
 
 export interface StratumState {
   strata: Stratum[]
@@ -22,6 +23,8 @@ export const stratumStore = createStore<StratumState>((set, get) => ({
   save: async (stratum) => {
     await syncPut<Stratum>(db.strata, stratum)
     await get().hydrate()
+    // 深度区间变化后，掉出区间的出土物登账号退回待核
+    await artifactStore.getState().revalidateAccession(get().strata)
   },
   remove: async (id) => {
     await syncDelete<Stratum>(db.strata, id)

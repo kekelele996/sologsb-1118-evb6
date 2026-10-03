@@ -2,9 +2,10 @@ import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
 import type { Artifact, Relation, Stratum, Trench } from '@/types'
+import { emptyWarehouseSide } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -29,7 +30,7 @@ class TrenchLogDb extends Dexie {
       meta: 'key'
     })
     // v2：地层单位新增「开口层位」字段，迁移时为历史数据补齐默认值
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         trenches: 'id, code, area, backfilled',
         strata: 'id, trenchId, code, type, topDepth',
@@ -47,6 +48,50 @@ class TrenchLogDb extends Dexie {
             }
             if (!Array.isArray(stratum.inclusions)) {
               stratum.inclusions = []
+            }
+          })
+      })
+    // v3：出土物新增库房侧字段（移交状态 / 登账号 / 库位 / 借出），旧数据没有入库信息，统一先归「未移交」
+    this.version(SCHEMA_VERSION)
+      .stores({
+        trenches: 'id, code, area, backfilled',
+        strata: 'id, trenchId, code, type, topDepth',
+        artifacts: 'id, stratumId, code, category, date, handover',
+        relations: 'id, unitAId, unitBId, type, basis',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Artifact, string>('artifacts')
+          .toCollection()
+          .modify((artifact) => {
+            const defaults = emptyWarehouseSide()
+            if (!artifact.handover) {
+              artifact.handover = defaults.handover
+            }
+            if (typeof artifact.handoverDate !== 'string') {
+              artifact.handoverDate = defaults.handoverDate
+            }
+            if (typeof artifact.accessionNo !== 'string') {
+              artifact.accessionNo = defaults.accessionNo
+            }
+            if (!artifact.accessionStatus) {
+              artifact.accessionStatus = defaults.accessionStatus
+            }
+            if (typeof artifact.storageLocation !== 'string') {
+              artifact.storageLocation = defaults.storageLocation
+            }
+            if (typeof artifact.loanTo !== 'string') {
+              artifact.loanTo = defaults.loanTo
+            }
+            if (typeof artifact.loanDate !== 'string') {
+              artifact.loanDate = defaults.loanDate
+            }
+            if (typeof artifact.checkinDate !== 'string') {
+              artifact.checkinDate = defaults.checkinDate
+            }
+            if (typeof artifact.checkinError !== 'string') {
+              artifact.checkinError = defaults.checkinError
             }
           })
       })
@@ -193,7 +238,16 @@ export async function seedDemoData(): Promise<void> {
       z: 0.42,
       date: today,
       collector: '祁野',
-      tempLocation: '工地临时柜 A-2'
+      tempLocation: '工地临时柜 A-2',
+      handover: '已入库',
+      handoverDate: today,
+      accessionNo: 'KG2026-0001',
+      accessionStatus: '已确认',
+      storageLocation: '驻地库房 B 架 3 层',
+      loanTo: '',
+      loanDate: '',
+      checkinDate: today,
+      checkinError: ''
     },
     {
       id: 'af_002',
@@ -207,7 +261,16 @@ export async function seedDemoData(): Promise<void> {
       z: 1.05,
       date: today,
       collector: '祁野',
-      tempLocation: '工地临时柜 A-3'
+      tempLocation: '工地临时柜 A-3',
+      handover: '未移交',
+      handoverDate: '',
+      accessionNo: '',
+      accessionStatus: '待核',
+      storageLocation: '',
+      loanTo: '',
+      loanDate: '',
+      checkinDate: '',
+      checkinError: ''
     }
   ])
 

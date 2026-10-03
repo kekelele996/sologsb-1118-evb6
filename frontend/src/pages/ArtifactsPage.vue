@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { Artifact, ArtifactCategory, Completeness } from '@/types'
+import type { Artifact, ArtifactCategory, Completeness, HandoverStatus, SitePatch } from '@/types'
 import { ARTIFACT_CATEGORIES, COMPLETENESS } from '@/types'
 import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import UnitPicker from '@/components/common/UnitPicker.vue'
@@ -146,7 +146,7 @@ async function submit(): Promise<void> {
     )
     return
   }
-  const row: Artifact = {
+  const row: SitePatch = {
     id: editingId.value ?? uid('af'),
     stratumId: lockedStratum.value.id,
     code: form.code.trim(),
@@ -160,9 +160,26 @@ async function submit(): Promise<void> {
     collector: form.collector.trim(),
     tempLocation: form.tempLocation.trim()
   }
-  await artifactStore.getState().save(row)
+  // 只提交工地侧字段；登账号、库位等库房侧字段由保管员在「库房管理」页维护
+  await artifactStore.getState().saveSite(row, stratumState.strata)
   ElMessage.success(`出土物 ${row.code} 已登记到 ${lockedStratum.value.code}`)
   resetForm()
+}
+
+async function handover(artifact: Artifact): Promise<void> {
+  await ElMessageBox.confirm(
+    `确认将「${artifact.code}」从工地临时柜移交库房？移交后登账号与库位由库房保管员维护。`,
+    '移交确认',
+    { type: 'warning' }
+  )
+  await artifactStore.getState().handover(artifact.id)
+  ElMessage.success(`出土物 ${artifact.code} 已移交库房`)
+}
+
+const handoverTagType: Record<HandoverStatus, 'info' | 'warning' | 'success'> = {
+  未移交: 'info',
+  已移交: 'warning',
+  已入库: 'success'
 }
 
 async function remove(artifact: Artifact): Promise<void> {
@@ -186,7 +203,10 @@ function exportList(): void {
       z: item.z,
       date: item.date,
       collector: item.collector,
-      tempLocation: item.tempLocation
+      tempLocation: item.tempLocation,
+      handover: item.handover,
+      accessionNo: item.accessionNo,
+      storageLocation: item.storageLocation
     })) as unknown as Record<string, unknown>[],
     [
       { key: 'code', label: '器物编号' },
@@ -200,7 +220,10 @@ function exportList(): void {
       { key: 'z', label: 'Z 深度(m)' },
       { key: 'date', label: '出土日期' },
       { key: 'collector', label: '提取人' },
-      { key: 'tempLocation', label: '临时存放' }
+      { key: 'tempLocation', label: '临时存放' },
+      { key: 'handover', label: '移交状态' },
+      { key: 'accessionNo', label: '登账号' },
+      { key: 'storageLocation', label: '库位' }
     ]
   )
   ElMessage.success('出土物清单已导出')
@@ -213,7 +236,7 @@ function exportList(): void {
       <div>
         <h2 class="page-title">出土物登记与清单</h2>
         <p class="page-sub">
-          登记时先锁定所属地层单位（选择器按探方与类型级联），页面即时带出该单位的深度区间并校验出土深度是否落在区间内。
+          记录员维护器物编号（实物标签编号）与出土坐标，登记时先锁定所属地层单位并校验出土深度；登账号与库位由库房保管员在「库房管理」页维护，两处各管各的、互不覆盖。
         </p>
       </div>
       <el-button @click="exportList">导出清单</el-button>
@@ -337,10 +360,28 @@ function exportList(): void {
       </el-table-column>
       <el-table-column prop="date" label="出土日期" width="120" />
       <el-table-column prop="collector" label="提取人" width="90" />
-      <el-table-column prop="tempLocation" label="临时存放" min-width="140" show-overflow-tooltip />
-      <el-table-column label="操作" width="130" fixed="right">
+      <el-table-column prop="tempLocation" label="临时存放" min-width="130" show-overflow-tooltip />
+      <el-table-column label="移交状态" width="96">
+        <template #default="{ row }: { row: Artifact }">
+          <el-tag :type="handoverTagType[row.handover]" effect="plain">{{ row.handover }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="登账号" width="130">
+        <template #default="{ row }: { row: Artifact }">
+          <span class="mono">{{ row.accessionNo || '—' }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="库位" min-width="130">
+        <template #default="{ row }: { row: Artifact }">
+          <span>{{ row.storageLocation || '—' }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="200" fixed="right">
         <template #default="{ row }: { row: Artifact }">
           <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+          <el-button v-if="row.handover === '未移交'" link type="warning" size="small" @click="handover(row)">
+            移交库房
+          </el-button>
           <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
